@@ -57,7 +57,6 @@ class ExTokBot:
 
     def worker(self, delay_job, delay_complete, max_fails, max_jobs):
         thread_name = threading.current_thread().name
-        
         while not self.task_queue.empty():
             acc = self.task_queue.get()
             if acc is None: break
@@ -66,6 +65,7 @@ class ExTokBot:
             acc_name = acc.get('nickname', 'Unknown')
             jobs_done = 0 
             fail_count = 0
+            empty_scan_count = 0
             
             print(f"{Fore.CYAN}[Luồng {thread_name}] Bắt đầu làm cho: {acc_name}{Style.RESET_ALL}")
 
@@ -75,78 +75,74 @@ class ExTokBot:
                     jobs = res.json().get("data", [])
                     
                     if not jobs:
-                        print(f"{Fore.YELLOW}[!] {acc_name} hết job, chuyển acc tiếp theo...{Style.RESET_ALL}")
-                        break
+                        empty_scan_count += 1
+                        print(f"{Fore.YELLOW}[!] {acc_name} không có job (Lần quét: {empty_scan_count}/2)...{Style.RESET_ALL}")
+                        if empty_scan_count >= 2:
+                            print(f"{Fore.YELLOW}[!] {acc_name} hết job, chuyển acc tiếp theo.{Style.RESET_ALL}")
+                            break
+                        time.sleep(3)
+                        continue
                     
+                    empty_scan_count = 0
                     for job in jobs:
                         if jobs_done >= max_jobs: break
-                        
                         print(f"\n{Fore.BLUE}[Luồng {thread_name}] {Fore.WHITE}Acc: {acc_name} | {Fore.GREEN}Job: {job.get('type')} | @{job['tiktok_username']}{Style.RESET_ALL}")
                         self.countdown(delay_job, "Chờ làm job", thread_name)
-                        
                         complete_res = requests.post(f"{self.base_url}/tiktok-jobs/complete", 
-                                      json={"job_id": job['id'], "unique_id": u_id, "success": True},
-                                      headers=self.get_headers())
+                                      json={"job_id": job['id'], "unique_id": u_id, "success": True}, headers=self.get_headers())
                         
                         if complete_res.status_code == 200:
-                            res_data = complete_res.json()
-                            coin_earned = float(res_data.get("data", {}).get("coin", 0))
                             jobs_done += 1
-                            print(f"{Fore.GREEN}[+] {acc_name} | Done: {jobs_done}/{max_jobs} | Xu: +{coin_earned:.5f}{Style.RESET_ALL}")
                             fail_count = 0
                             self.countdown(delay_complete, "Nghỉ sau job", thread_name)
                         else:
                             fail_count += 1
-                            print(f"{Fore.RED}[!] {acc_name} thất bại lần {fail_count}/{max_fails}{Style.RESET_ALL}")
-                            if fail_count >= max_fails:
-                                print(f"{Fore.RED}[!] {acc_name} lỗi quá nhiều, dừng làm acc này.{Style.RESET_ALL}")
-                                jobs_done = max_jobs # Để thoát vòng lặp job
-                                break 
+                            if fail_count >= max_fails: break
                 except Exception as e:
-                    print(f"\n{Fore.RED}[!] Lỗi xử lý acc {acc_name}: {e}{Style.RESET_ALL}")
+                    print(f"\n{Fore.RED}[!] Lỗi xử lý {acc_name}: {e}{Style.RESET_ALL}")
                     break
-            
-            print(f"{Fore.MAGENTA}[*] {acc_name} đã hoàn thành hoặc lỗi. Chuyển acc tiếp theo.{Style.RESET_ALL}")
             self.task_queue.task_done()
 
     def start(self):
-        accounts = self.get_accounts()
-        if not accounts: return
+        mode = input(f"{Fore.YELLOW}Chọn chế độ (1: Đa luồng, 2: Chọn lọc): {Style.RESET_ALL}")
+        delay_job = int(input(f"{Fore.YELLOW}Thời gian chờ job (s): {Style.RESET_ALL}"))
+        delay_complete = int(input(f"{Fore.YELLOW}Thời gian nghỉ sau job (s): {Style.RESET_ALL}"))
+        max_fails = int(input(f"{Fore.YELLOW}Số lần lỗi tối đa: {Style.RESET_ALL}"))
+        max_jobs = int(input(f"{Fore.YELLOW}Số job mỗi acc: {Style.RESET_ALL}"))
         
-        print(f"{Fore.CYAN}Chọn chế độ chạy:{Style.RESET_ALL}")
-        print(f"1. Chế độ đa luồng (Tất cả acc)")
-        print(f"2. Chế độ chọn lọc (Chọn nhiều acc chạy song song)")
-        mode = input(f"{Fore.YELLOW}Nhập lựa chọn (1/2): {Style.RESET_ALL}")
-
-        delay_job = int(input(f"{Fore.YELLOW}Thời gian chờ trước khi làm job (s): {Style.RESET_ALL}"))
-        delay_complete = int(input(f"{Fore.YELLOW}Thời gian nghỉ sau khi hoàn thành (s): {Style.RESET_ALL}"))
-        max_fails = int(input(f"{Fore.YELLOW}Số lần thất bại để đổi/dừng: {Style.RESET_ALL}"))
-        max_jobs = int(input(f"{Fore.YELLOW}Số lượng job tối đa mỗi acc: {Style.RESET_ALL}"))
-
-        if mode == "1":
+        selected_indices = []
+        if mode == "2":
+            accounts = self.get_accounts()
+            self.display_accounts(accounts)
+            selection = input(f"{Fore.YELLOW}Nhập STT tài khoản (vd: 1,3,4): {Style.RESET_ALL}")
+            selected_indices = [int(i.strip()) for i in selection.split(',')]
+            num_threads = min(len(selected_indices), 5)
+        else:
             num_threads = int(input(f"{Fore.YELLOW}Nhập số luồng chạy: {Style.RESET_ALL}"))
-            for acc in accounts: self.task_queue.put(acc)
+
+        while True:
+            accounts = self.get_accounts()
+            if not accounts:
+                print(f"{Fore.RED}[!] Không có tài khoản, thử lại sau 60s...{Style.RESET_ALL}")
+                time.sleep(60)
+                continue
+            
+            # Nạp acc vào hàng đợi dựa trên mode
+            if mode == "1":
+                for acc in accounts: self.task_queue.put(acc)
+            else:
+                for idx in selected_indices:
+                    if 0 <= idx < len(accounts): self.task_queue.put(accounts[idx])
+            
+            threads = []
             for i in range(num_threads):
                 t = threading.Thread(target=self.worker, args=(delay_job, delay_complete, max_fails, max_jobs), name=str(i+1))
-                t.daemon = True
                 t.start()
-
-        elif mode == "2":
-            self.display_accounts(accounts)
-            selection = input(f"{Fore.YELLOW}Nhập STT tài khoản (cách nhau bởi dấu phẩy, vd: 1,3,4): {Style.RESET_ALL}")
-            selected_indices = [int(i.strip()) for i in selection.split(',')]
-            for idx in selected_indices:
-                if 0 <= idx < len(accounts):
-                    self.task_queue.put(accounts[idx])
+                threads.append(t)
             
-            num_threads = min(len(selected_indices), 5)
-            for i in range(num_threads):
-                t = threading.Thread(target=self.worker, args=(delay_job, delay_complete, max_fails, max_jobs), name=f"Acc-{i}")
-                t.daemon = True
-                t.start()
-
-        print(f"{Fore.GREEN}[*] Bot đã khởi động. Đang đợi...{Style.RESET_ALL}")
-        while True: time.sleep(60)
+            for t in threads: t.join()
+            print(f"\n{Fore.MAGENTA}[*] Hoàn thành vòng chạy. Nghỉ 30s rồi bắt đầu lại...{Style.RESET_ALL}")
+            time.sleep(30)
 
 if __name__ == "__main__":
     bot = ExTokBot()
