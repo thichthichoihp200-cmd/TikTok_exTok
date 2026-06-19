@@ -32,13 +32,14 @@ class ExTokBot:
         return {"Authorization": f"Bearer {self.token}", "User-Agent": USER_AGENT, "Content-Type": "application/json"}
 
     def display_accounts(self, accounts):
-        print(f"\n{Fore.MAGENTA}" + "="*75)
-        print(f"{'STT':<5} | {'ID':<8} | {'Nickname':<20} | {'Jobs Hôm Nay':<12} | {'Tổng Jobs'}")
-        print("-"*75 + Style.RESET_ALL)
+        print(f"\n{Fore.MAGENTA}" + "="*95)
+        print(f"{'STT':<5} | {'ID':<8} | {'Nickname':<20} | {'Jobs Hôm Nay':<12} | {'Tổng Jobs':<10} | {'Số dư'}")
+        print("-"*95 + Style.RESET_ALL)
         for idx, acc in enumerate(accounts):
             nick = str(acc.get('nickname', 'N/A'))[:18]
-            print(f"{idx:<5} | {acc.get('id'):<8} | {nick:<20} | {acc.get('count_jobs_today',0):<12} | {acc.get('total_jobs',0)}")
-        print(f"{Fore.MAGENTA}" + "="*75 + Style.RESET_ALL + "\n")
+            balance = acc.get('balance', 0)
+            print(f"{idx:<5} | {acc.get('id'):<8} | {nick:<20} | {acc.get('count_jobs_today',0):<12} | {acc.get('total_jobs',0):<10} | {Fore.YELLOW}{balance}{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}" + "="*95 + Style.RESET_ALL + "\n")
 
     def get_accounts(self):
         try:
@@ -57,17 +58,20 @@ class ExTokBot:
 
     def worker(self, delay_job, delay_complete, max_fails, max_jobs):
         thread_name = threading.current_thread().name
-        while not self.task_queue.empty():
+        while True:
             acc = self.task_queue.get()
-            if acc is None: break
+            if acc is None:
+                self.task_queue.task_done()
+                break
             
             u_id = acc['unique_id']
             acc_name = acc.get('nickname', 'Unknown')
+            balance = acc.get('balance', 0)
             jobs_done = 0 
             fail_count = 0
             empty_scan_count = 0
             
-            print(f"{Fore.CYAN}[Luồng {thread_name}] Bắt đầu làm cho: {acc_name}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}[Luồng {thread_name}] Bắt đầu làm cho: {acc_name} | {Fore.YELLOW}Số dư: {balance} Xu{Style.RESET_ALL}")
 
             while jobs_done < max_jobs:
                 try:
@@ -76,7 +80,6 @@ class ExTokBot:
                     
                     if not jobs:
                         empty_scan_count += 1
-                        print(f"{Fore.YELLOW}[!] {acc_name} không có job (Lần quét: {empty_scan_count}/2)...{Style.RESET_ALL}")
                         if empty_scan_count >= 2:
                             print(f"{Fore.YELLOW}[!] {acc_name} hết job, chuyển acc tiếp theo.{Style.RESET_ALL}")
                             break
@@ -86,18 +89,24 @@ class ExTokBot:
                     empty_scan_count = 0
                     for job in jobs:
                         if jobs_done >= max_jobs: break
-                        print(f"\n{Fore.BLUE}[Luồng {thread_name}] {Fore.WHITE}Acc: {acc_name} | {Fore.GREEN}Job: {job.get('type')} | @{job['tiktok_username']}{Style.RESET_ALL}")
+                        print(f"{Fore.BLUE}[Luồng {thread_name}] {Fore.WHITE}Acc: {acc_name} | {Fore.GREEN}Job: {job.get('type')} | @{job['tiktok_username']}{Style.RESET_ALL}")
                         self.countdown(delay_job, "Chờ làm job", thread_name)
+                        
                         complete_res = requests.post(f"{self.base_url}/tiktok-jobs/complete", 
                                       json={"job_id": job['id'], "unique_id": u_id, "success": True}, headers=self.get_headers())
                         
                         if complete_res.status_code == 200:
                             jobs_done += 1
                             fail_count = 0
+                            print(f"{Fore.GREEN}[+] Hoàn thành job thành công!{Style.RESET_ALL}")
                             self.countdown(delay_complete, "Nghỉ sau job", thread_name)
                         else:
                             fail_count += 1
-                            if fail_count >= max_fails: break
+                            print(f"{Fore.RED}[!] Job lỗi ({fail_count}/{max_fails}){Style.RESET_ALL}")
+                            if fail_count >= max_fails: 
+                                print(f"{Fore.RED}[!] Tài khoản {acc_name} đã lỗi quá {max_fails} lần. Chuyển sang tài khoản tiếp theo...{Style.RESET_ALL}")
+                                jobs_done = max_jobs 
+                                break
                 except Exception as e:
                     print(f"\n{Fore.RED}[!] Lỗi xử lý {acc_name}: {e}{Style.RESET_ALL}")
                     break
@@ -110,7 +119,6 @@ class ExTokBot:
         max_fails = int(input(f"{Fore.YELLOW}Số lần lỗi tối đa: {Style.RESET_ALL}"))
         max_jobs = int(input(f"{Fore.YELLOW}Số job mỗi acc: {Style.RESET_ALL}"))
         
-        selected_indices = []
         if mode == "2":
             accounts = self.get_accounts()
             self.display_accounts(accounts)
@@ -127,12 +135,13 @@ class ExTokBot:
                 time.sleep(60)
                 continue
             
-            # Nạp acc vào hàng đợi dựa trên mode
             if mode == "1":
                 for acc in accounts: self.task_queue.put(acc)
             else:
                 for idx in selected_indices:
                     if 0 <= idx < len(accounts): self.task_queue.put(accounts[idx])
+            
+            for _ in range(num_threads): self.task_queue.put(None)
             
             threads = []
             for i in range(num_threads):
